@@ -1,0 +1,118 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
+#include <lvgl.h>
+
+TFT_eSPI tft = TFT_eSPI();
+
+#define LVGL_TICK_PERIOD 10
+
+lv_disp_buf_t disp_buf;
+static lv_color_t buf[LV_HOR_RES_MAX * 10];
+
+static void lvgl_task(void *pvParameters) {
+  (void)pvParameters;
+
+  lv_init();
+
+  lv_disp_buf_init(&disp_buf, buf, NULL, LV_HOR_RES_MAX * 10);
+
+  lv_disp_drv_t disp_drv;
+  lv_disp_drv_init(&disp_drv);
+  disp_drv.hor_res = LV_HOR_RES;
+  disp_drv.ver_res = LV_VER_RES;
+  disp_drv.flush_cb = [](const lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color) {
+    tft.startWrite();
+    tft.setAddrWindow(area->x1, area->y1, area->x2, area->y2);
+    tft.pushColors((uint16_t *)color, (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1), false);
+    tft.endWrite();
+    lv_disp_flush_ready(disp);
+  };
+  disp_drv.buffer = &disp_buf;
+  lv_disp_drv_register(&disp_drv);
+
+  lv_indev_drv_t indev_drv;
+  lv_indev_drv_init(&indev_drv);
+  indev_drv.type = LV_INDEV_TYPE_POINTER;
+  indev_drv.read_cb = [](lv_indev_drv_t *indev, lv_indev_data_t *data) {
+    static uint16_t last_x = 0;
+    static uint16_t last_y = 0;
+    uint16_t x, y;
+    bool touched = tft.getTouch(&x, &y);
+    if (touched) {
+      last_x = x;
+      last_y = y;
+      data->state = LV_INDEV_STATE_PR;
+    } else {
+      data->state = LV_INDEV_STATE_REL;
+    }
+    data->point.x = last_x;
+    data->point.y = last_y;
+  };
+  lv_indev_drv_register(&indev_drv);
+
+  lv_obj_t *scr = lv_obj_create(NULL, NULL);
+  lv_scr_load(scr);
+
+  lv_obj_t *label = lv_label_create(scr, NULL);
+  lv_label_set_text(label, "Do you want to run the incident response script?");
+  lv_obj_align(label, NULL, LV_ALIGN_CENTER, 0, 0);
+
+  lv_obj_t *btn_yes = lv_btn_create(scr, NULL);
+  lv_obj_align(btn_yes, NULL, LV_ALIGN_IN_BOTTOM_LEFT, 20, -20);
+  lv_obj_set_size(btn_yes, 100, 40);
+  lv_obj_t *label_yes = lv_label_create(btn_yes, NULL);
+  lv_label_set_text(label_yes, "Yes");
+  lv_obj_set_event_cb(btn_yes, [](lv_obj_t *obj, lv_event_t event) {
+    if (event == LV_EVENT_CLICKED) {
+      Keyboard.begin();
+      delay(500);
+      Keyboard.print("powershell.exe");
+      Keyboard.press(KEY_RETURN);
+      delay(1000);
+      Keyboard.print("Start-Process powershell -Verb runAs ; exit");
+      delay(1000);
+      Keyboard.print("mkdir $env:USERPROFILE\\AppData\\Local\\Temp ; cd $env:USERPROFILE\\AppData\\Local\\Temp ; Invoke-WebRequest -Uri https://www.clamav.net/downloads/production/clamav-0.105.0.win.x64.zip -OutFile clam.zip ; Expand-Archive -Force clam.zip ; del clam.zip ; cd clam\\* ; mv .\\conf_examples\\freshclam.conf.sample freshclam.conf ; mv .\\conf_examples\\clamd.conf.sample clamd.conf ; Set-Content -Path \"freshclam.conf\" -Value (get-content -Path \"freshclam.conf\" | Select-String -Pattern 'Example' -NotMatch) ; Set-Content -Path \"clamd.conf\" -Value (get-content -Path \"clamd.conf\" | Select-String -Pattern 'Example' -NotMatch) ; Start-Process -Wait .\\freshclam.exe ; Start-Process -NoNewWindow -Wait .\\clamscan.exe \"--memory --kill\" ; cd $env:USERPROFILE\\AppData\\Local\\Temp ; rmdir -R clam");
+      Keyboard.press(KEY_RETURN);
+      delay(1000);
+
+      lv_obj_clean(scr);
+      lv_label_set_text(label, "Upload completed!");
+      lv_obj_align(label, NULL, LV_ALIGN_CENTER, 0, 0);
+    }
+  });
+
+  lv_obj_t *btn_no = lv_btn_create(scr, NULL);
+  lv_obj_align(btn_no, NULL, LV_ALIGN_IN_BOTTOM_RIGHT, -20, -20);
+  lv_obj_set_size(btn_no, 100, 40);
+  lv_obj_t *label_no = lv_label_create(btn_no, NULL);
+  lv_label_set_text(label_no, "No");
+  lv_obj_set_event_cb(btn_no, [](lv_obj_t *obj, lv_event_t event) {
+    if (event == LV_EVENT_CLICKED) {
+      lv_obj_clean(scr);
+      lv_label_set_text(label, "Waiting for upload...");
+      lv_obj_align(label, NULL, LV_ALIGN_CENTER, 0, 0);
+    }
+  });
+
+  lv_task_handler();
+
+  while (true) {
+    lv_task_handler();
+    vTaskDelay(pdMS_TO_TICKS(LVGL_TICK_PERIOD));
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  tft.begin();
+  tft.setRotation(1);
+
+  xTaskCreate(lvgl_task, "LVGL", 4096, NULL, 5, NULL);
+}
+
+void loop() {
+  // Do nothing
+}
